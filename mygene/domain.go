@@ -2,7 +2,7 @@ package mygene
 
 import (
 	"context"
-	"net/url"
+	"fmt"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
@@ -19,9 +19,6 @@ import (
 // mygene:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone mygene binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the mygene driver. It carries no state; the per-run client is
@@ -36,36 +33,33 @@ func (Domain) Info() kit.DomainInfo {
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "mygene",
-			Short:  "A command line for mygene.",
-			Long: `A command line for mygene.
+			Short:  "A command line for MyGene.info gene annotations.",
+			Long: `A command line for MyGene.info.
 
-mygene reads public mygene data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+mygene reads gene annotations from MyGene.info, a BioThings API aggregating
+68M+ genes across all species. Search by symbol, name, or description; fetch
+individual gene records; look up exact symbols. No API key required.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/mygene-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `mygene page` and
-	// `ant get mygene://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{Name: "search", Group: "read", List: true,
+		Summary: "Search genes by symbol, name, or description",
+		Args:    []kit.Arg{{Name: "query", Help: "search query (e.g. TP53, tumor protein p53)"}}}, searchGenes)
 
-	// List op: members of a page, the home of `mygene links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// mygene://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{Name: "gene", Group: "read", Single: true,
+		Summary: "Get a single gene by Entrez Gene ID or Ensembl ID", URIType: "gene", Resolver: true,
+		Args: []kit.Arg{{Name: "id", Help: "Entrez Gene ID (e.g. 7157) or Ensembl ID (e.g. ENSG00000141510)"}}}, getGene)
+
+	kit.Handle(app, kit.OpMeta{Name: "symbol", Group: "read", List: true,
+		Summary: "Find genes by exact symbol",
+		Args:    []kit.Arg{{Name: "symbol", Help: "gene symbol (e.g. TP53, BRCA1)"}}}, symbolGenes)
 }
 
 // newClient builds the client from the host-resolved config, so a host and the
@@ -88,40 +82,65 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type searchInput struct {
+	Query   string  `kit:"arg"          help:"search query"`
+	Limit   int     `kit:"flag,inherit" help:"max results"`
+	Species string  `kit:"flag"         help:"filter by species (e.g. human, 9606, mouse)"`
+	Client  *Client `kit:"inject"`
+}
+
+type geneInput struct {
+	ID     string  `kit:"arg"    help:"Entrez Gene ID or Ensembl ID"`
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
-	Client *Client `kit:"inject"`
+type symbolInput struct {
+	Symbol  string  `kit:"arg"          help:"gene symbol"`
+	Limit   int     `kit:"flag,inherit" help:"max results"`
+	Species string  `kit:"flag"         help:"filter by species (e.g. human, 9606, mouse)"`
+	Client  *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func searchGenes(ctx context.Context, in searchInput, emit func(*Gene) error) error {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	genes, _, err := in.Client.SearchGenes(ctx, in.Query, limit, in.Species)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
+	for _, g := range genes {
+		if err := emit(g); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
+func getGene(ctx context.Context, in geneInput, emit func(*Gene) error) error {
+	g, err := in.Client.GetGene(ctx, in.ID)
 	if err != nil {
 		return mapErr(err)
 	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	return emit(g)
+}
+
+func symbolGenes(ctx context.Context, in symbolInput, emit func(*Gene) error) error {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	query := fmt.Sprintf("symbol:%s", in.Symbol)
+	genes, _, err := in.Client.SearchGenes(ctx, query, limit, in.Species)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, g := range genes {
+		if err := emit(g); err != nil {
 			return err
 		}
 	}
@@ -130,44 +149,30 @@ func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
 
 // --- Resolver: the URI-native string functions, pure and network-free ---
 
-// Classify turns any accepted input — a bare path or a full mygene.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
+// Classify turns any accepted input into the canonical (type, id).
+// Any non-empty string is accepted as a gene ID.
 func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized mygene reference: %q", input)
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return "", "", errs.Usage("gene ID required")
 	}
-	return "page", id, nil
+	return "gene", s, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
+// Numeric IDs resolve to the NCBI Gene page; Ensembl IDs resolve to mygene.info.
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	if uriType != "gene" {
 		return "", errs.Usage("mygene has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
-}
-
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
+	if isNumeric(id) {
+		return "https://www.ncbi.nlm.nih.gov/gene/" + id, nil
 	}
-	return strings.Trim(input, "/")
+	return "https://mygene.info/gene/" + id, nil
 }
 
 // mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// exit code.
 func mapErr(err error) error {
 	return err
 }
