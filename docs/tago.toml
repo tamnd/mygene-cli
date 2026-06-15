@@ -1,0 +1,10 @@
+title       = "mygene"
+baseURL     = "https://mygene-cli.tamnd.com/"
+description = "A command line for mygene."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/mygene-cli"
